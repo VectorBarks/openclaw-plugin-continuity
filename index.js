@@ -432,14 +432,15 @@ module.exports = {
 
             // 3. Archive the exchange (strip context blocks from user message)
             const toArchive = [];
-            if (lastUser) {
+            if (lastUser && userMessage && userMessage.trim().length > 0) {
                 const cleanUser = { ...lastUser, timestamp: lastUser.timestamp || new Date().toISOString() };
                 // Replace content with stripped version so we don't archive plugin context
-                if (userMessage && userMessage !== rawUserMessage) {
+                if (userMessage !== rawUserMessage) {
                     cleanUser.content = userMessage;
                 }
                 toArchive.push(cleanUser);
             }
+            // Archive agent response even if user message was entirely plugin-injected
             if (lastAssistant) {
                 toArchive.push({
                     ...lastAssistant,
@@ -746,6 +747,19 @@ function _stripContextBlocks(text) {
     //   [CONTINUITY CONTEXT]\n...\n\n[STABILITY CONTEXT]\n...\n\n[Timestamp] actual user text
     // Strip everything from known context block headers through to the user's actual text.
     // The timestamp marker (e.g. [Mon 2026-02-16 08:57 PST]) signals the start of real content.
+
+    // Strip standalone recall blocks (injected by prependContext but may appear
+    // without the [CONTINUITY CONTEXT] header in heartbeat/compacted turns)
+    if (text.startsWith('You remember these earlier conversations') ||
+        text.startsWith('From your knowledge base:')) {
+        const tsMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
+        if (tsMatch) {
+            return text.substring(tsMatch.index + tsMatch[0].length);
+        }
+        // No timestamp found = this is ONLY recall text, no real user message
+        return '';
+    }
+
     // Match the full timestamp bracket: [Mon 2026-02-16 09:20 PST]
     const timestampMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
     if (timestampMatch) {
@@ -765,7 +779,12 @@ function _stripContextBlocks(text) {
             !line.startsWith('Anchors:') &&
             !line.startsWith('Entropy:') &&
             !line.startsWith('Principles:') &&
-            !line.startsWith('Recent decisions:')
+            !line.startsWith('Recent decisions:') &&
+            !line.startsWith('You remember these') &&
+            !line.startsWith('- They told you:') &&
+            !line.startsWith('  You said:') &&
+            !line.startsWith('Speak from this memory') &&
+            !line.startsWith('From your knowledge base:')
         );
         if (realStart >= 0) {
             return lines.slice(realStart).join('\n').trim();
