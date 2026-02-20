@@ -305,10 +305,10 @@ module.exports = {
                                     });
                                     for (const ex of recalled) {
                                         if (ex.userText) {
-                                            lines.push(`- They told you: "${_truncate(ex.userText, 150)}"`);
+                                            lines.push(`- They told you: "${_truncate(ex.userText, 800)}"`);
                                         }
                                         if (ex.agentText) {
-                                            lines.push(`  You said: "${_truncate(ex.agentText, 150)}"`);
+                                            lines.push(`  You said: "${_truncate(ex.agentText, 800)}"`);
                                         }
                                     }
                                     lines.push('Speak from this memory naturally. Never say "I don\'t have information" about things you remember above.');
@@ -426,8 +426,8 @@ module.exports = {
             // Proprioceptive framing: ownership language, not disclosure
             const recallLines = ['You remember these conversations with this user:\n'];
             for (const ex of usefulExchanges.slice(0, 5)) {
-                if (ex.userText) recallLines.push(`They told you: "${_truncate(ex.userText, 300)}"`);
-                if (ex.agentText) recallLines.push(`You said: "${_truncate(ex.agentText, 300)}"`);
+                if (ex.userText) recallLines.push(`They told you: "${_truncate(ex.userText, 1000)}"`);
+                if (ex.agentText) recallLines.push(`You said: "${_truncate(ex.agentText, 1000)}"`);
                 recallLines.push('');
             }
             recallLines.push('Speak from this memory naturally when answering.');
@@ -926,6 +926,21 @@ function _formatAge(timestamp) {
 
 function _truncate(text, maxLen) {
     if (!text || text.length <= maxLen) return text;
+    // Sentence-boundary aware: find last sentence end before maxLen
+    const region = text.substring(0, maxLen);
+    const lastSentenceEnd = Math.max(
+        region.lastIndexOf('. '),
+        region.lastIndexOf('? '),
+        region.lastIndexOf('! '),
+        region.lastIndexOf('.\n'),
+        region.lastIndexOf('?\n'),
+        region.lastIndexOf('!\n')
+    );
+    // If we found a sentence boundary in the latter half, use it
+    if (lastSentenceEnd > maxLen * 0.5) {
+        return text.substring(0, lastSentenceEnd + 1) + '...';
+    }
+    // Fallback: hard cut
     return text.substring(0, maxLen - 3) + '...';
 }
 
