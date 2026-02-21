@@ -95,7 +95,7 @@ class Searcher {
      * @param {number} [limit=5] - max results to return
      * @returns {{ exchanges: Array, distances: number[] }}
      */
-    async search(query, limit = 5) {
+    async search(query, limit = 5, agentId) {
         if (!this.db) {
             return { exchanges: [], distances: [], error: 'Database not available' };
         }
@@ -123,7 +123,10 @@ class Searcher {
                 ? this._ftsSearch(query, fetchLimit)
                 : [];
 
-            // Build exchange lookup (all candidates from both lists)
+            // Pick up graph results from the graph plugin (if running)
+            const graphResults = agentId ? this._getGraphResults(agentId) : [];
+
+            // Build exchange lookup (all candidates from all lists)
             const exchangeMap = new Map();
             for (const r of semanticResults) {
                 exchangeMap.set(r.id, r);
@@ -133,10 +136,15 @@ class Searcher {
                     exchangeMap.set(r.id, r);
                 }
             }
+            for (const r of graphResults) {
+                if (!exchangeMap.has(r.id)) {
+                    exchangeMap.set(r.id, r);
+                }
+            }
 
-            // Fuse ranked lists with RRF
+            // Fuse ranked lists with RRF (3-way when graph results are available)
             const rrfScores = this._reciprocalRankFusion(
-                [semanticResults, keywordResults],
+                [semanticResults, keywordResults, graphResults],
                 this._rrfK
             );
 
@@ -217,6 +225,65 @@ class Searcher {
         }
 
         return lines.join('\n');
+    }
+
+    // ---------------------------------------------------------------
+    // Graph results (from openclaw-plugin-graph via global bus)
+    // ---------------------------------------------------------------
+
+    /**
+     * Pick up graph-based retrieval results exposed by the graph plugin.
+     *
+     * The graph plugin runs during before_agent_start (priority 8, before
+     * continuity at priority 10) and posts its ranked exchange IDs to
+     * global.__ocGraph.lastResults[agentId].
+     *
+     * We only use results that are fresh (<5s old) to avoid stale data
+     * from a previous turn bleeding in.
+     *
+     * Graph results have exchange IDs but may not have full text — we
+     * look them up in our exchanges table to get the full row.
+     *
+     * @param {string} agentId - agent ID to look up results for
+     * @returns {Array} ranked results compatible with RRF input
+     */
+    _getGraphResults(agentId) {
+        if (!global.__ocGraph?.lastResults?.[agentId]) return [];
+        const cached = global.__ocGraph.lastResults[agentId];
+
+        // Only use results from the current turn (within 5 seconds)
+        if (Date.now() - cached.timestamp > 5000) return [];
+
+        const exchanges = cached.exchanges || [];
+        if (exchanges.length === 0) return [];
+
+        // Look up full exchange data from our continuity DB
+        const results = [];
+        for (const gex of exchanges) {
+            if (!gex.id) continue;
+            try {
+                const row = this.db.prepare(
+                    'SELECT * FROM exchanges WHERE id = ?'
+                ).get(gex.id);
+                if (row) {
+                    results.push({
+                        id: row.id,
+                        date: row.date,
+                        exchangeIndex: row.exchange_index,
+                        userText: row.user_text,
+                        agentText: row.agent_text,
+                        combined: row.combined,
+                        metadata: this._parseMetadata(row.metadata),
+                        createdAt: row.created_at,
+                        distance: null, // no vector distance for graph results
+                        graphScore: gex.score
+                    });
+                }
+            } catch {
+                // Exchange not found in continuity DB — skip
+            }
+        }
+        return results;
     }
 
     // ---------------------------------------------------------------

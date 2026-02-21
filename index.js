@@ -277,7 +277,7 @@ module.exports = {
                 try {
                     await state.ensureStorage();
                     if (state.searcher) {
-                        const results = await state.searcher.search(cleanUserText, 30);
+                        const results = await state.searcher.search(cleanUserText, 30, state.agentId);
                         console.error(`[Continuity:${state.agentId}] Search returned ${results?.exchanges?.length || 0} raw results`);
                         if (results?.exchanges?.length > 0) {
                             results.exchanges = _filterUsefulExchanges(results.exchanges);
@@ -351,7 +351,7 @@ module.exports = {
             try {
                 await state.ensureStorage();
                 if (state.searcher) {
-                    const results = await state.searcher.search(query, 30);
+                    const results = await state.searcher.search(query, 30, state.agentId);
                     if (results?.exchanges?.length > 0) {
                         state.lastRetrievalCache = results;
                     }
@@ -668,7 +668,8 @@ module.exports = {
                 }
                 const results = await state.searcher.search(
                     params?.text || params?.query || '',
-                    params?.limit || 5
+                    params?.limit || 5,
+                    state.agentId
                 );
                 respond(true, results);
             } catch (err) {
