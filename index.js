@@ -63,7 +63,7 @@ function ensureDir(dirPath) {
 // ---------------------------------------------------------------------------
 
 module.exports = {
-    id: 'continuity',
+    id: 'openclaw-plugin-continuity',
     name: 'Infinite Thread — Agent Continuity & Memory',
 
     configSchema: {
