@@ -22,6 +22,7 @@ class Searcher {
         this.db = db;
         this._embeddingFn = null;
         this._initialized = false;
+        this.model = config.embedding?.model || 'Xenova/all-MiniLM-L6-v2';
 
         // Temporal ranking config
         this._recencyHalfLifeDays = config.search?.recencyHalfLifeDays || 14;
@@ -44,7 +45,7 @@ class Searcher {
         } catch {
             try {
                 const { pipeline } = require('@huggingface/transformers');
-                const pipe = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+                const pipe = await pipeline('feature-extraction', this.model);
                 this._embeddingFn = {
                     generate: async (texts) => {
                         const results = [];
@@ -182,8 +183,8 @@ class Searcher {
 
         for (const ex of items) {
             lines.push(`[${ex.date}]`);
-            if (ex.userText) lines.push(`  User: ${this._truncate(ex.userText, 300)}`);
-            if (ex.agentText) lines.push(`  Agent: ${this._truncate(ex.agentText, 300)}`);
+            if (ex.userText) lines.push(`  User: ${this._truncate(ex.userText, 800)}`);
+            if (ex.agentText) lines.push(`  Agent: ${this._truncate(ex.agentText, 800)}`);
             lines.push('');
         }
 
@@ -219,6 +220,19 @@ class Searcher {
 
     _truncate(text, maxLen) {
         if (!text || text.length <= maxLen) return text;
+        // Sentence-boundary aware: find last sentence end before maxLen
+        const region = text.substring(0, maxLen);
+        const lastSentenceEnd = Math.max(
+            region.lastIndexOf('. '),
+            region.lastIndexOf('? '),
+            region.lastIndexOf('! '),
+            region.lastIndexOf('.\n'),
+            region.lastIndexOf('?\n'),
+            region.lastIndexOf('!\n')
+        );
+        if (lastSentenceEnd > maxLen * 0.5) {
+            return text.substring(0, lastSentenceEnd + 1) + '...';
+        }
         return text.substring(0, maxLen - 3) + '...';
     }
 }
