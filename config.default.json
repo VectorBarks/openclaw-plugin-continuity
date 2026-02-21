@@ -67,6 +67,12 @@
     "dbFile": "continuity.db"
   },
 
+  "search": {
+    "recencyHalfLifeDays": 14,
+    "recencyWeight": 0.15,
+    "rrfK": 60
+  },
+
   "session": {
     "interruptedGap": 7200000,
     "newSessionGap": 21600000

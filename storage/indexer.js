@@ -32,6 +32,7 @@ class Indexer {
         this._embeddingFn = null;
         this._embeddingPipeline = null;
         this._initialized = false;
+        this._fts5Available = false;
     }
 
     /**
@@ -106,6 +107,14 @@ class Indexer {
             VALUES (?, ?)
         `);
 
+        // FTS5 keyword index (parallel to vec)
+        const deleteFts = this._fts5Available
+            ? this.db.prepare(`DELETE FROM fts_exchanges WHERE id = ?`)
+            : null;
+        const insertFts = this._fts5Available
+            ? this.db.prepare(`INSERT INTO fts_exchanges (id, user_text, agent_text) VALUES (?, ?, ?)`)
+            : null;
+
         let indexed = 0;
 
         for (let i = 0; i < exchanges.length; i++) {
@@ -123,16 +132,25 @@ class Indexer {
                     hasAgent: !!exchange.agent
                 });
 
+                const userText = exchange.user?.text || '';
+                const agentText = exchange.agent?.text || '';
+
                 const transaction = this.db.transaction(() => {
                     insertExchange.run(
                         id, date, i,
-                        exchange.user?.text || '',
-                        exchange.agent?.text || '',
+                        userText,
+                        agentText,
                         combined,
                         metadata
                     );
                     deleteVec.run(id);
                     insertVec.run(id, new Float32Array(embedding));
+
+                    // FTS5 index (keyword search)
+                    if (deleteFts && insertFts) {
+                        deleteFts.run(id);
+                        insertFts.run(id, userText, agentText);
+                    }
                 });
                 transaction();
 
@@ -248,7 +266,61 @@ class Indexer {
             }
         }
 
+        // FTS5 full-text search table (keyword search alongside semantic)
+        // Uses porter stemmer so "running" matches "run", plus unicode61 for broad char support.
+        this._createFts5Table();
+
         console.log('[Indexer] Database tables ready');
+    }
+
+    /**
+     * Create the FTS5 virtual table for keyword search.
+     * Backfills from existing exchanges if the table is new.
+     */
+    _createFts5Table() {
+        try {
+            // content='' would make it contentless (smaller) but we need DELETE support
+            // for INSERT OR REPLACE semantics, so we use a regular FTS5 table.
+            this.db.exec(`
+                CREATE VIRTUAL TABLE IF NOT EXISTS fts_exchanges USING fts5(
+                    id,
+                    user_text,
+                    agent_text,
+                    tokenize='porter unicode61'
+                )
+            `);
+
+            // Check if backfill is needed: if fts_exchanges is empty but exchanges has rows
+            const ftsCount = this.db.prepare('SELECT COUNT(*) as count FROM fts_exchanges').get();
+            const mainCount = this.db.prepare('SELECT COUNT(*) as count FROM exchanges').get();
+
+            if (ftsCount.count === 0 && mainCount.count > 0) {
+                console.log(`[Indexer] Backfilling FTS5 index for ${mainCount.count} existing exchanges...`);
+
+                const insertFts = this.db.prepare(
+                    `INSERT INTO fts_exchanges (id, user_text, agent_text) VALUES (?, ?, ?)`
+                );
+
+                const allExchanges = this.db.prepare(
+                    'SELECT id, user_text, agent_text FROM exchanges'
+                ).all();
+
+                const backfill = this.db.transaction(() => {
+                    for (const row of allExchanges) {
+                        insertFts.run(row.id, row.user_text || '', row.agent_text || '');
+                    }
+                });
+                backfill();
+
+                console.log(`[Indexer] FTS5 backfill complete: ${allExchanges.length} exchanges indexed`);
+            }
+        } catch (e) {
+            // FTS5 is an enhancement — don't block startup if it fails
+            console.warn('[Indexer] FTS5 table creation failed (non-fatal):', e.message);
+            this._fts5Available = false;
+            return;
+        }
+        this._fts5Available = true;
     }
 
     /**

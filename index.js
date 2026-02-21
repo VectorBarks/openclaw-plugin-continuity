@@ -267,7 +267,10 @@ module.exports = {
             );
 
             state.lastRetrievalCache = null;
-            const RELEVANCE_THRESHOLD = 1.0; // compositeScore below this = semantically relevant
+            // Relevance gate uses semantic distance (lower = more similar).
+            // distance < 1.0 = reasonably relevant match. RRF compositeScore is used
+            // for ranking but distance remains the interpretable relevance signal.
+            const DISTANCE_THRESHOLD = 1.0;
             console.error(`[Continuity:${state.agentId}] Search: intent=${hasContinuityIntent}, len=${cleanUserText.length}, query="${cleanUserText.substring(0, 80)}"`);
 
             if (cleanUserText.length >= 10) {
@@ -286,9 +289,9 @@ module.exports = {
                                 // Inject into prependContext if:
                                 // 1. Explicit continuity intent (user asking about past), OR
                                 // 2. Top result is semantically relevant (distance below threshold)
-                                const topScore = results.exchanges[0].compositeScore ?? results.exchanges[0].distance;
-                                const shouldInject = hasContinuityIntent || topScore < RELEVANCE_THRESHOLD;
-                                console.error(`[Continuity:${state.agentId}] topScore=${topScore.toFixed(3)}, threshold=${RELEVANCE_THRESHOLD}, inject=${shouldInject}`);
+                                const topDistance = results.exchanges[0].distance ?? 1.0;
+                                const shouldInject = hasContinuityIntent || topDistance < DISTANCE_THRESHOLD;
+                                console.error(`[Continuity:${state.agentId}] topDistance=${topDistance.toFixed(3)}, threshold=${DISTANCE_THRESHOLD}, inject=${shouldInject}`);
 
                                 if (shouldInject) {
                                     // Proprioceptive framing (from Clint's architecture):

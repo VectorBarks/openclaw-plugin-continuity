@@ -1,15 +1,24 @@
 /**
- * Searcher — Cross-session semantic retrieval via SQLite-vec.
+ * Searcher — Cross-session hybrid retrieval via SQLite-vec + FTS5.
  *
  * Extracted from Clint's archiveIndexer.js (search logic) +
  * knowledgeSystem.js (vec MATCH query pattern).
  *
- * Shares the same continuity.db as Indexer. Queries vec_exchanges
- * for semantically similar past exchanges, re-ranked with temporal
- * decay so newer exchanges about the same topic outrank older ones.
+ * Shares the same continuity.db as Indexer. Runs two parallel searches:
+ *   1. Semantic — vec_exchanges MATCH (embedding similarity)
+ *   2. Keyword  — fts_exchanges MATCH (BM25 full-text search via FTS5)
+ *
+ * Results are fused using Reciprocal Rank Fusion (RRF), then re-ranked
+ * with temporal decay so newer exchanges about the same topic outrank
+ * older ones.
+ *
+ * Falls back to semantic-only if FTS5 table is not available.
  *
  * Temporal ranking pattern adapted from Clint's intelligentRetrieval.js:
  * recencyBoost = exp(-ageInDays / halfLife) * weight
+ *
+ * RRF pattern from Hindsight/Cormack et al.:
+ * score(doc) = SUM(1 / (k + rank)) across ranked lists
  */
 
 class Searcher {
@@ -27,6 +36,13 @@ class Searcher {
         // Temporal ranking config
         this._recencyHalfLifeDays = config.search?.recencyHalfLifeDays || 14;
         this._recencyWeight = config.search?.recencyWeight || 0.15;
+
+        // RRF config
+        this._rrfK = config.search?.rrfK || 60;
+
+        // FTS5 availability (checked on first search)
+        this._fts5Checked = false;
+        this._fts5Available = false;
     }
 
     /**
@@ -64,11 +80,16 @@ class Searcher {
     }
 
     /**
-     * Search for semantically similar exchanges with temporal re-ranking.
+     * Hybrid search: semantic + keyword retrieval fused with RRF.
      *
-     * 1. Fetch candidates from vec (semantic distance)
-     * 2. Re-rank by blending distance with recency boost
-     * 3. Sort by composite score (lower = better)
+     * 1. Run semantic search (vec_exchanges MATCH)
+     * 2. Run keyword search (fts_exchanges MATCH) — if available
+     * 3. Fuse ranked lists with Reciprocal Rank Fusion
+     * 4. Apply temporal decay boost
+     * 5. Return top results sorted by composite score (higher = better)
+     *
+     * API is unchanged from the semantic-only version: callers don't
+     * need to know about the dual-retrieval under the hood.
      *
      * @param {string} query - natural language search query
      * @param {number} [limit=5] - max results to return
@@ -87,67 +108,74 @@ class Searcher {
             return { exchanges: [], distances: [], error: 'Embedding model not available' };
         }
 
-        try {
-            // Generate query embedding
-            const embeddings = await this._embeddingFn.generate([query]);
-            const queryEmbedding = embeddings?.[0];
-            if (!queryEmbedding) {
-                return { exchanges: [], distances: [], error: 'Failed to generate query embedding' };
-            }
+        // Check FTS5 availability once
+        if (!this._fts5Checked) {
+            this._checkFts5();
+        }
 
+        try {
             // Fetch more candidates than needed — re-ranking may reorder them.
-            // We fetch 2x limit so temporal boost can promote newer exchanges
-            // that ranked slightly lower by pure semantic distance.
             const fetchLimit = Math.min(limit * 2, 60);
 
-            const results = this.db.prepare(`
-                SELECT
-                    e.id,
-                    e.combined,
-                    e.user_text,
-                    e.agent_text,
-                    e.date,
-                    e.exchange_index,
-                    e.metadata,
-                    e.created_at,
-                    v.distance
-                FROM vec_exchanges v
-                JOIN exchanges e ON e.id = v.id
-                WHERE v.embedding MATCH ?
-                AND k = ?
-                ORDER BY v.distance ASC
-            `).all(new Float32Array(queryEmbedding), fetchLimit);
+            // Run semantic and keyword searches
+            const semanticResults = await this._semanticSearch(query, fetchLimit);
+            const keywordResults = this._fts5Available
+                ? this._ftsSearch(query, fetchLimit)
+                : [];
 
-            // Re-rank with temporal decay
+            // Build exchange lookup (all candidates from both lists)
+            const exchangeMap = new Map();
+            for (const r of semanticResults) {
+                exchangeMap.set(r.id, r);
+            }
+            for (const r of keywordResults) {
+                if (!exchangeMap.has(r.id)) {
+                    exchangeMap.set(r.id, r);
+                }
+            }
+
+            // Fuse ranked lists with RRF
+            const rrfScores = this._reciprocalRankFusion(
+                [semanticResults, keywordResults],
+                this._rrfK
+            );
+
+            // Apply temporal decay and build final results
             const now = Date.now();
-            const reranked = results.map(r => {
-                const ageMs = now - this._parseTimestamp(r.date, r.exchange_index, r.created_at);
+            const fused = [];
+
+            for (const [id, rrfScore] of rrfScores) {
+                const ex = exchangeMap.get(id);
+                if (!ex) continue;
+
+                const ageMs = now - this._parseTimestamp(ex.date, ex.exchangeIndex, ex.createdAt);
                 const ageDays = ageMs / (1000 * 60 * 60 * 24);
                 const recencyBoost = Math.exp(-ageDays / this._recencyHalfLifeDays) * this._recencyWeight;
 
-                // Composite score: lower distance is better, higher recency is better.
-                // Subtract recency boost from distance so newer exchanges score lower (better).
-                const compositeScore = r.distance - recencyBoost;
+                // Composite score: higher RRF = more relevant, multiply by (1 + recencyBoost)
+                // so newer docs get bumped up. Higher = better.
+                const compositeScore = rrfScore * (1 + recencyBoost);
 
-                return {
-                    id: r.id,
-                    date: r.date,
-                    exchangeIndex: r.exchange_index,
-                    userText: r.user_text,
-                    agentText: r.agent_text,
-                    combined: r.combined,
-                    metadata: this._parseMetadata(r.metadata),
-                    distance: r.distance,
+                fused.push({
+                    id: ex.id,
+                    date: ex.date,
+                    exchangeIndex: ex.exchangeIndex,
+                    userText: ex.userText,
+                    agentText: ex.agentText,
+                    combined: ex.combined,
+                    metadata: ex.metadata,
+                    distance: ex.distance ?? 1.0, // preserve for backward compat
+                    rrfScore,
                     recencyBoost,
                     compositeScore
-                };
-            });
+                });
+            }
 
-            // Sort by composite score (lower = more relevant + more recent)
-            reranked.sort((a, b) => a.compositeScore - b.compositeScore);
+            // Sort by composite score (higher = more relevant + more recent)
+            fused.sort((a, b) => b.compositeScore - a.compositeScore);
 
             // Take the top results
-            const top = reranked.slice(0, limit);
+            const top = fused.slice(0, limit);
 
             return {
                 exchanges: top,
@@ -192,8 +220,199 @@ class Searcher {
     }
 
     // ---------------------------------------------------------------
-    // Internal
+    // Search strategies
     // ---------------------------------------------------------------
+
+    /**
+     * Semantic search via SQLite-vec embedding similarity.
+     * Returns results ranked by vector distance (lower = more similar).
+     *
+     * @param {string} query
+     * @param {number} limit
+     * @returns {Array} ranked results with exchange data
+     */
+    async _semanticSearch(query, limit) {
+        const embeddings = await this._embeddingFn.generate([query]);
+        const queryEmbedding = embeddings?.[0];
+        if (!queryEmbedding) return [];
+
+        const results = this.db.prepare(`
+            SELECT
+                e.id,
+                e.combined,
+                e.user_text,
+                e.agent_text,
+                e.date,
+                e.exchange_index,
+                e.metadata,
+                e.created_at,
+                v.distance
+            FROM vec_exchanges v
+            JOIN exchanges e ON e.id = v.id
+            WHERE v.embedding MATCH ?
+            AND k = ?
+            ORDER BY v.distance ASC
+        `).all(new Float32Array(queryEmbedding), limit);
+
+        return results.map(r => ({
+            id: r.id,
+            date: r.date,
+            exchangeIndex: r.exchange_index,
+            userText: r.user_text,
+            agentText: r.agent_text,
+            combined: r.combined,
+            metadata: this._parseMetadata(r.metadata),
+            createdAt: r.created_at,
+            distance: r.distance
+        }));
+    }
+
+    /**
+     * Keyword search via FTS5 full-text index.
+     * Returns results ranked by BM25 relevance (lower rank = more relevant).
+     *
+     * FTS5's bm25() returns negative scores where more negative = more relevant,
+     * so we negate and sort descending. The rank order is what matters for RRF
+     * though, not the raw scores.
+     *
+     * @param {string} query
+     * @param {number} limit
+     * @returns {Array} ranked results with exchange data
+     */
+    _ftsSearch(query, limit) {
+        const ftsQuery = this._sanitizeFtsQuery(query);
+        if (!ftsQuery) return [];
+
+        try {
+            // FTS5 MATCH with BM25 ranking
+            // bm25(fts_exchanges) returns negative floats: more negative = better match
+            const results = this.db.prepare(`
+                SELECT
+                    f.id,
+                    e.combined,
+                    e.user_text,
+                    e.agent_text,
+                    e.date,
+                    e.exchange_index,
+                    e.metadata,
+                    e.created_at,
+                    bm25(fts_exchanges) AS bm25_score
+                FROM fts_exchanges f
+                JOIN exchanges e ON e.id = f.id
+                WHERE fts_exchanges MATCH ?
+                ORDER BY bm25(fts_exchanges) ASC
+                LIMIT ?
+            `).all(ftsQuery, limit);
+
+            return results.map(r => ({
+                id: r.id,
+                date: r.date,
+                exchangeIndex: r.exchange_index,
+                userText: r.user_text,
+                agentText: r.agent_text,
+                combined: r.combined,
+                metadata: this._parseMetadata(r.metadata),
+                createdAt: r.created_at,
+                distance: null, // no vector distance for keyword results
+                bm25Score: r.bm25_score
+            }));
+        } catch (err) {
+            console.warn('[Searcher] FTS5 search failed:', err.message);
+            return [];
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Reciprocal Rank Fusion
+    // ---------------------------------------------------------------
+
+    /**
+     * Merge multiple ranked result lists using Reciprocal Rank Fusion.
+     *
+     * For each document appearing in any list:
+     *   score(doc) = SUM( 1 / (k + rank) ) across all lists
+     *
+     * k=60 is the standard constant that prevents top-ranked documents
+     * from dominating — it smooths the contribution curve.
+     *
+     * @param {Array<Array>} rankedLists - arrays of results (each with .id)
+     * @param {number} k - RRF constant (default 60)
+     * @returns {Map<string, number>} id → fused score (higher = better)
+     */
+    _reciprocalRankFusion(rankedLists, k = 60) {
+        const scores = new Map();
+
+        for (const list of rankedLists) {
+            if (!list || list.length === 0) continue;
+            for (let rank = 0; rank < list.length; rank++) {
+                const id = list[rank].id;
+                const prev = scores.get(id) || 0;
+                scores.set(id, prev + 1 / (k + rank + 1));
+            }
+        }
+
+        return scores;
+    }
+
+    // ---------------------------------------------------------------
+    // Internal helpers
+    // ---------------------------------------------------------------
+
+    /**
+     * Check if the FTS5 table exists in the database.
+     * Called once, result cached.
+     */
+    _checkFts5() {
+        this._fts5Checked = true;
+        try {
+            // sqlite_master query to check for the FTS5 table
+            const row = this.db.prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='fts_exchanges'"
+            ).get();
+            this._fts5Available = !!row;
+            if (this._fts5Available) {
+                console.log('[Searcher] FTS5 keyword search enabled (hybrid mode)');
+            } else {
+                console.log('[Searcher] FTS5 not available — semantic-only mode');
+            }
+        } catch {
+            this._fts5Available = false;
+        }
+    }
+
+    /**
+     * Sanitize a natural language query for FTS5 MATCH syntax.
+     *
+     * FTS5 has special characters (*, ", ^, NEAR, AND, OR, NOT) that
+     * can cause parse errors if passed raw. We extract meaningful words
+     * and join them with implicit AND (FTS5 default).
+     *
+     * Also applies porter stemming awareness: "running" and "run" match
+     * because the tokenizer handles it, so we just need clean words.
+     *
+     * @param {string} query - raw user query
+     * @returns {string} sanitized FTS5 query, or empty string if nothing useful
+     */
+    _sanitizeFtsQuery(query) {
+        if (!query) return '';
+
+        // Remove FTS5 operators and special chars
+        let cleaned = query
+            .replace(/[*"^(){}[\]:]/g, '')   // FTS5 special chars
+            .replace(/\b(AND|OR|NOT|NEAR)\b/gi, '')  // FTS5 operators
+            .replace(/[.,!?;]/g, ' ')         // punctuation to spaces
+            .replace(/\s+/g, ' ')             // collapse whitespace
+            .trim();
+
+        // Split into words and filter out very short ones (noise)
+        const words = cleaned.split(' ').filter(w => w.length >= 2);
+
+        if (words.length === 0) return '';
+
+        // Join with spaces — FTS5 implicit AND between terms.
+        // Wrap each word in quotes to prevent them being parsed as operators.
+        return words.map(w => `"${w}"`).join(' ');
+    }
 
     /**
      * Parse a timestamp from the exchange data.
