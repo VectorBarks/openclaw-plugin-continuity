@@ -37,6 +37,11 @@ class Searcher {
         this._recencyHalfLifeDays = config.search?.recencyHalfLifeDays || 14;
         this._recencyWeight = config.search?.recencyWeight || 0.15;
 
+        // Formational memory config (knowledge.db backfill)
+        this._formationalBoost = config.search?.formationalBoost || 0.08;
+        this._formationalWeight = config.search?.formationalWeight || 0.85;
+        this._arcWeight = config.search?.arcWeight || 0.5;
+
         // RRF config
         this._rrfK = config.search?.rrfK || 60;
 
@@ -160,9 +165,27 @@ class Searcher {
                 const ageDays = ageMs / (1000 * 60 * 60 * 24);
                 const recencyBoost = Math.exp(-ageDays / this._recencyHalfLifeDays) * this._recencyWeight;
 
-                // Composite score: higher RRF = more relevant, multiply by (1 + recencyBoost)
-                // so newer docs get bumped up. Higher = better.
-                const compositeScore = rrfScore * (1 + recencyBoost);
+                // Source-aware scoring for formational memories (knowledge.db backfill)
+                //
+                // Formational memories are old (100+ days) so natural recency decay
+                // reduces their boost to near-zero (~0.0008). To prevent them being
+                // permanently buried, we replace decayed recency with a fixed floor
+                // boost, then apply a type-specific weight multiplier.
+                //
+                // ARC-AGI puzzle solves get a lower weight (0.5x) than identity/
+                // philosophical memories (0.85x) because they're task-specific.
+                const meta = typeof ex.metadata === 'object' ? ex.metadata : this._parseMetadata(ex.metadata);
+                let compositeScore;
+
+                if (meta?.source === 'formational') {
+                    const typeWeight = meta?.arcAgi
+                        ? this._arcWeight
+                        : this._formationalWeight;
+                    compositeScore = rrfScore * (1 + this._formationalBoost) * typeWeight;
+                } else {
+                    // Standard scoring for ongoing (new) memories
+                    compositeScore = rrfScore * (1 + recencyBoost);
+                }
 
                 fused.push({
                     id: ex.id,
