@@ -218,10 +218,10 @@ module.exports = {
             const sessionAge = _formatDuration(Date.now() - state.sessionStart);
             lines.push(`Session: ${state.exchangeCount} exchanges | Started: ${sessionAge}`);
 
-            // Active topics
+            // Active topics (capped at 3 to reduce injection overhead)
             const allTopics = state.topicTracker.getAllTopics();
             if (allTopics.length > 0) {
-                const topicStrs = allTopics.slice(0, 5).map(t => {
+                const topicStrs = allTopics.slice(0, 3).map(t => {
                     if (t.mentions >= config.topicTracking.fixationThreshold) {
                         return `${t.topic} (fixated — ${t.mentions} mentions)`;
                     }
@@ -231,14 +231,19 @@ module.exports = {
                 lines.push(`Topics: ${topicStrs.join(', ')}`);
             }
 
-            // Continuity anchors
-            const activeAnchors = state.anchors.getAnchors();
-            if (activeAnchors.length > 0) {
-                const anchorStrs = activeAnchors.slice(0, 5).map(a => {
-                    const age = _formatAge(a.timestamp);
-                    return `${a.type.toUpperCase()}: "${_truncate(a.text, 80)}" (${age})`;
-                });
-                lines.push(`Anchors: ${anchorStrs.join(' | ')}`);
+            // Continuity anchors — only inject when entropy is elevated
+            // (identity/contradiction/tension anchors are most valuable during
+            // high-entropy exchanges, not calm nominal conversation)
+            const currentEntropy = api.stability?.getEntropy?.(ctx.agentId) || 0;
+            if (currentEntropy > 0.4) {
+                const activeAnchors = state.anchors.getAnchors();
+                if (activeAnchors.length > 0) {
+                    const anchorStrs = activeAnchors.slice(0, 3).map(a => {
+                        const age = _formatAge(a.timestamp);
+                        return `${a.type.toUpperCase()}: "${_truncate(a.text, 80)}" (${age})`;
+                    });
+                    lines.push(`Anchors: ${anchorStrs.join(' | ')}`);
+                }
             }
 
             // Topic fixation notes
@@ -307,11 +312,14 @@ module.exports = {
                                         return (a.exchangeIndex || 0) - (b.exchangeIndex || 0);
                                     });
                                     for (const ex of recalled) {
-                                        if (ex.userText) {
-                                            lines.push(`- They told you: "${_truncate(ex.userText, 800)}"`);
+                                        // Strip context blocks from recalled text to prevent feedback loop
+                                        const cleanUserText = ex.userText ? _stripContextBlocks(ex.userText) : null;
+                                        const cleanAgentText = ex.agentText ? _stripContextBlocks(ex.agentText) : null;
+                                        if (cleanUserText) {
+                                            lines.push(`- They told you: "${_truncate(cleanUserText, 800)}"`);
                                         }
-                                        if (ex.agentText) {
-                                            lines.push(`  You said: "${_truncate(ex.agentText, 800)}"`);
+                                        if (cleanAgentText) {
+                                            lines.push(`  You said: "${_truncate(cleanAgentText, 800)}"`);
                                         }
                                     }
                                     lines.push('Speak from this memory naturally. Never say "I don\'t have information" about things you remember above.');
@@ -407,19 +415,24 @@ module.exports = {
             const usefulExchanges = _filterUsefulExchanges(state.lastRetrievalCache.exchanges);
 
             // Inject archive results as additional entries in the results array
-            const archiveResults = usefulExchanges.slice(0, 5).map(ex => ({
-                id: `archive_${ex.date}_${ex.exchangeIndex}`,
-                path: `[conversation archive: ${ex.date}]`,
-                startLine: 0,
-                endLine: 0,
-                snippet: _truncate(
-                    (ex.userText ? `User: ${ex.userText}\n` : '') +
-                    (ex.agentText ? `Agent: ${ex.agentText}` : ''),
-                    700
-                ),
-                source: 'conversation-archive',
-                score: ex.distance ? Math.max(0, 1 - ex.distance) : 0.5
-            }));
+            // Strip context blocks from recalled text to prevent snowball
+            const archiveResults = usefulExchanges.slice(0, 5).map(ex => {
+                const cleanUser = ex.userText ? _stripContextBlocks(ex.userText) : '';
+                const cleanAgent = ex.agentText ? _stripContextFromAgentResponse(ex.agentText) : '';
+                return {
+                    id: `archive_${ex.date}_${ex.exchangeIndex}`,
+                    path: `[conversation archive: ${ex.date}]`,
+                    startLine: 0,
+                    endLine: 0,
+                    snippet: _truncate(
+                        (cleanUser ? `User: ${cleanUser}\n` : '') +
+                        (cleanAgent ? `Agent: ${cleanAgent}` : ''),
+                        700
+                    ),
+                    source: 'conversation-archive',
+                    score: ex.distance ? Math.max(0, 1 - ex.distance) : 0.5
+                };
+            });
 
             if (archiveResults.length === 0) return;
 
@@ -429,8 +442,11 @@ module.exports = {
             // Proprioceptive framing: ownership language, not disclosure
             const recallLines = ['You remember these conversations with this user:\n'];
             for (const ex of usefulExchanges.slice(0, 5)) {
-                if (ex.userText) recallLines.push(`They told you: "${_truncate(ex.userText, 1000)}"`);
-                if (ex.agentText) recallLines.push(`You said: "${_truncate(ex.agentText, 1000)}"`);
+                // Strip context blocks from recalled text to prevent feedback loop
+                const cleanUser = ex.userText ? _stripContextBlocks(ex.userText) : null;
+                const cleanAgent = ex.agentText ? _stripContextFromAgentResponse(ex.agentText) : null;
+                if (cleanUser) recallLines.push(`They told you: "${_truncate(cleanUser, 1000)}"`);
+                if (cleanAgent) recallLines.push(`You said: "${_truncate(cleanAgent, 1000)}"`);
                 recallLines.push('');
             }
             recallLines.push('Speak from this memory naturally when answering.');
@@ -485,12 +501,14 @@ module.exports = {
             //    Filter out plugin-injected context blocks to prevent feedback loop
             const cleanMessages = messages.filter(m => {
                 const text = _extractText(m);
-                return !text.startsWith('[CONTINUITY CONTEXT]') &&
-                       !text.startsWith('[STABILITY CONTEXT]');
+                return !CONTEXT_BLOCK_HEADERS.some(h => text.startsWith(h));
             });
             state.anchors.detect(cleanMessages);
 
-            // 3. Archive the exchange (strip context blocks from user message)
+            // 3. Archive the exchange (strip context blocks from BOTH sides)
+            //    User messages have prependContext baked in by OpenClaw.
+            //    Agent responses sometimes quote context blocks back verbatim.
+            //    Both must be stripped to prevent the compounding snowball.
             const toArchive = [];
             if (lastUser && userMessage && userMessage.trim().length > 0) {
                 const cleanUser = { ...lastUser, timestamp: lastUser.timestamp || new Date().toISOString() };
@@ -500,12 +518,17 @@ module.exports = {
                 }
                 toArchive.push(cleanUser);
             }
-            // Archive agent response even if user message was entirely plugin-injected
+            // Archive agent response — strip any context blocks the agent quoted back
             if (lastAssistant) {
-                toArchive.push({
+                const cleanResponse = _stripContextFromAgentResponse(responseText);
+                const cleanAssistant = {
                     ...lastAssistant,
                     timestamp: lastAssistant.timestamp || new Date().toISOString()
-                });
+                };
+                if (cleanResponse !== responseText) {
+                    cleanAssistant.content = cleanResponse;
+                }
+                toArchive.push(cleanAssistant);
             }
 
             try {
@@ -839,56 +862,132 @@ function _distillSearchQuery(text) {
     return q;
 }
 
+/**
+ * All known context block prefixes injected by OpenClaw plugins.
+ * Used by _stripContextBlocks and _isContextLine to prevent
+ * plugin context from leaking into archives and recalled memories.
+ *
+ * When adding a new plugin that injects via prependContext,
+ * add its block header here.
+ */
+const CONTEXT_BLOCK_HEADERS = [
+    '[CONTINUITY CONTEXT]',
+    '[STABILITY CONTEXT]',
+    '[ACTIVE PROJECTS]',
+    '[ACTIVE CONSTRAINTS]',
+    '[OPEN DIRECTIVES',       // note: no closing bracket (may have suffix)
+    '[GROWTH VECTORS]',
+    '[GRAPH CONTEXT]',
+    '[GRAPH NOTE]',
+    '[CONTEMPLATION STATE]',
+    '[TOPIC NOTE]',
+    '[ARCHIVE RETRIEVAL]',
+    '[LOOP DETECTED]',
+];
+
+/**
+ * Line-level prefixes that belong to plugin-injected context.
+ * These appear inside context blocks (not as block headers).
+ */
+const CONTEXT_LINE_PREFIXES = [
+    'Session:',
+    'Topics:',
+    'Anchors:',
+    'Entropy:',
+    'Principles:',
+    'Recent decisions:',
+    'You remember these',
+    '- They told you:',
+    '  You said:',
+    'Speak from this memory',
+    'From your knowledge base:',
+    'You know these connections:',
+    'Active inquiries:',
+    'Recent insights',
+    '- Q: "',
+    '  Insight: "',
+];
+
+function _isContextLine(line) {
+    if (line.length === 0) return true; // blank lines between blocks
+    for (const header of CONTEXT_BLOCK_HEADERS) {
+        if (line.startsWith(header)) return true;
+    }
+    for (const prefix of CONTEXT_LINE_PREFIXES) {
+        if (line.startsWith(prefix)) return true;
+    }
+    // Lines that are clearly context metadata
+    if (/^- [A-Z]+:/.test(line)) return false; // real content like "- NOTE: ..."
+    if (line.startsWith('- "') || line.startsWith('  -')) return true; // nested recall items
+    return false;
+}
+
 function _stripContextBlocks(text) {
     if (!text) return '';
-    // prependContext is baked into the user message by OpenClaw:
-    //   [CONTINUITY CONTEXT]\n...\n\n[STABILITY CONTEXT]\n...\n\n[Timestamp] actual user text
-    // Strip everything from known context block headers through to the user's actual text.
-    // The timestamp marker (e.g. [Mon 2026-02-16 08:57 PST]) signals the start of real content.
 
-    // Strip standalone recall blocks (injected by prependContext but may appear
-    // without the [CONTINUITY CONTEXT] header in heartbeat/compacted turns)
-    if (text.startsWith('You remember these earlier conversations') ||
-        text.startsWith('From your knowledge base:')) {
-        const tsMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
-        if (tsMatch) {
-            return text.substring(tsMatch.index + tsMatch[0].length);
-        }
-        // No timestamp found = this is ONLY recall text, no real user message
-        return '';
+    // Fast path: no context blocks present
+    const hasBlock = CONTEXT_BLOCK_HEADERS.some(h => text.includes(h));
+    const hasRecall = text.includes('You remember these') || text.includes('From your knowledge base:');
+    if (!hasBlock && !hasRecall) return text;
+
+    // Primary strategy: find the timestamp marker that signals real user text.
+    // e.g. [Mon 2026-02-16 08:57 PST]
+    // Search for the LAST timestamp match — earlier ones may be inside recalled memories.
+    const tsRegex = /\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s\d{4}-\d{2}-\d{2}\s[^\]]*\]\s*/g;
+    let lastTsMatch = null;
+    let match;
+    while ((match = tsRegex.exec(text)) !== null) {
+        lastTsMatch = match;
+    }
+    if (lastTsMatch) {
+        return text.substring(lastTsMatch.index + lastTsMatch[0].length);
     }
 
-    // Match the full timestamp bracket: [Mon 2026-02-16 09:20 PST]
-    const timestampMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
-    if (timestampMatch) {
-        return text.substring(timestampMatch.index + timestampMatch[0].length);
+    // Fallback: strip known context lines from the beginning
+    const lines = text.split('\n');
+    const realStart = lines.findIndex(line => !_isContextLine(line));
+    if (realStart > 0) {
+        return lines.slice(realStart).join('\n').trim();
     }
-    // Fallback: strip known block prefixes line by line
-    if (text.startsWith('[CONTINUITY CONTEXT]') || text.startsWith('[STABILITY CONTEXT]')) {
-        // Find first line that doesn't look like injected context
-        const lines = text.split('\n');
-        const realStart = lines.findIndex(line =>
-            line.length > 0 &&
-            !line.startsWith('[CONTINUITY CONTEXT]') &&
-            !line.startsWith('[STABILITY CONTEXT]') &&
-            !line.startsWith('[TOPIC NOTE]') &&
-            !line.startsWith('Session:') &&
-            !line.startsWith('Topics:') &&
-            !line.startsWith('Anchors:') &&
-            !line.startsWith('Entropy:') &&
-            !line.startsWith('Principles:') &&
-            !line.startsWith('Recent decisions:') &&
-            !line.startsWith('You remember these') &&
-            !line.startsWith('- They told you:') &&
-            !line.startsWith('  You said:') &&
-            !line.startsWith('Speak from this memory') &&
-            !line.startsWith('From your knowledge base:')
-        );
-        if (realStart >= 0) {
-            return lines.slice(realStart).join('\n').trim();
-        }
-    }
+
+    // If entire text is context blocks (no real user message), return empty
+    if (realStart < 0) return '';
+
     return text;
+}
+
+/**
+ * Strip context blocks that the agent quoted back in its response.
+ * Unlike user messages (where blocks are prepended at the start),
+ * agent responses may contain blocks anywhere — e.g. Clint quoting
+ * "[STABILITY CONTEXT] Entropy: 0.35..." in his reply.
+ *
+ * Strategy: remove any contiguous run of context lines found in the text.
+ * Preserves surrounding real content.
+ */
+function _stripContextFromAgentResponse(text) {
+    if (!text) return '';
+    // Fast path
+    const hasBlock = CONTEXT_BLOCK_HEADERS.some(h => text.includes(h));
+    if (!hasBlock) return text;
+
+    const lines = text.split('\n');
+    const cleaned = [];
+    let inBlock = false;
+
+    for (const line of lines) {
+        if (CONTEXT_BLOCK_HEADERS.some(h => line.startsWith(h))) {
+            inBlock = true;
+            continue;
+        }
+        if (inBlock && _isContextLine(line)) {
+            continue;
+        }
+        inBlock = false;
+        cleaned.push(line);
+    }
+
+    return cleaned.join('\n').trim();
 }
 
 function _extractText(msg) {
