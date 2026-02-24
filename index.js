@@ -772,9 +772,19 @@ function _filterUsefulExchanges(exchanges) {
             "could you remind me about it"
         ];
         if (agentDenials.some(d => agentLower.includes(d))) return false;
+        
+        // --- Agent-side noise: injected recall blocks ---
+        if (agentLower.includes('you remember these earlier conversations')) return false;
+        if (agentLower.includes('you remember these conversations with this user')) return false;
 
         // --- User-side noise: meta-questions about remembering ---
         if (userLower.includes('a new session was started')) return false;
+        
+        // --- Plugin context blocks (should never be recalled) ---
+        if (userLower.includes('[contemplation state]')) return false;
+        if (userLower.includes('[stability context]')) return false;
+        if (userLower.includes('[continuity context]')) return false;
+        
         const userMetaPatterns = [
             'do you remember',
             'do you recall',
