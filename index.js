@@ -879,29 +879,24 @@ function _stripContextBlocks(text) {
     // Strip everything from known context block headers through to the user's actual text.
     // The timestamp marker (e.g. [Mon 2026-02-16 08:57 PST]) signals the start of real content.
 
-    // Strip standalone recall blocks (injected by prependContext but may appear
-    // without the [CONTINUITY CONTEXT] header in heartbeat/compacted turns)
-    // Also strip [CONTEMPLATION STATE] blocks that may appear at the start
-    if (text.startsWith('You remember these earlier conversations') ||
-        text.startsWith('From your knowledge base:') ||
-        text.startsWith('[CONTEMPLATION STATE]')) {
-        const tsMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
-        if (tsMatch) {
-            return text.substring(tsMatch.index + tsMatch[0].length);
-        }
-        // No timestamp found = this is ONLY recall/contemplation text, no real user message
-        return '';
-    }
-
-    // Match the full timestamp bracket: [Mon 2026-02-16 09:20 PST]
-    const timestampMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
+    // PRIORITY 1: Find timestamp marker - this is the most reliable indicator of real content
+    // Format: [Mon 2026-02-16 09:20 PST] or [Tue 2026-02-24 18:58 GMT+1]
+    const timestampMatch = text.match(/\n?\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]+\]\s*/);
     if (timestampMatch) {
+        // If timestamp is at the very start (no leading newline), return after it
+        if (timestampMatch.index === 0) {
+            return text.substring(timestampMatch[0].length);
+        }
+        // If there's content before the timestamp, it's context blocks - return after timestamp
         return text.substring(timestampMatch.index + timestampMatch[0].length);
     }
-    // Fallback: strip known block prefixes line by line
+
+    // PRIORITY 2: Strip known block prefixes line by line (fallback if no timestamp)
     if (text.startsWith('[CONTINUITY CONTEXT]') || 
         text.startsWith('[STABILITY CONTEXT]') ||
-        text.startsWith('[CONTEMPLATION STATE]')) {
+        text.startsWith('[CONTEMPLATION STATE]') ||
+        text.startsWith('You remember these earlier conversations') ||
+        text.startsWith('From your knowledge base:')) {
         // Find first line that doesn't look like injected context
         const lines = text.split('\n');
         const realStart = lines.findIndex(line =>
@@ -917,12 +912,13 @@ function _stripContextBlocks(text) {
             !line.startsWith('Principles:') &&
             !line.startsWith('Recent decisions:') &&
             !line.startsWith('Active inquiries:') &&
-            !line.startsWith('- "what is unknown') &&
+            !line.match(/^-\s*"/) &&  // Contemplation inquiry lines like - "what is unknown..."
             !line.startsWith('You remember these') &&
             !line.startsWith('- They told you:') &&
             !line.startsWith('  You said:') &&
             !line.startsWith('Speak from this memory') &&
             !line.startsWith('From your knowledge base:')
+        );
         );
         if (realStart >= 0) {
             return lines.slice(realStart).join('\n').trim();
