@@ -206,10 +206,18 @@ module.exports = {
 
             // Extract last user message from the event messages array
             const messages = event.messages || [];
-            const lastUser = [...messages].reverse().find(m =>
+            let lastUser = [...messages].reverse().find(m =>
                 m?.role === 'user'
             );
-            const lastUserText = _extractText(lastUser);
+            let lastUserText = _extractText(lastUser);
+
+            // Fallback: try event.message (singular) if messages array is empty
+            // OpenClaw may provide the user message in event.message at before_agent_start
+            if (!lastUserText && event.message) {
+                lastUserText = typeof event.message === 'string'
+                    ? event.message
+                    : _extractText(event.message);
+            }
 
             // Build continuity context block
             const lines = ['[CONTINUITY CONTEXT]'];
