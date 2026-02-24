@@ -881,13 +881,15 @@ function _stripContextBlocks(text) {
 
     // Strip standalone recall blocks (injected by prependContext but may appear
     // without the [CONTINUITY CONTEXT] header in heartbeat/compacted turns)
+    // Also strip [CONTEMPLATION STATE] blocks that may appear at the start
     if (text.startsWith('You remember these earlier conversations') ||
-        text.startsWith('From your knowledge base:')) {
+        text.startsWith('From your knowledge base:') ||
+        text.startsWith('[CONTEMPLATION STATE]')) {
         const tsMatch = text.match(/\n\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s[^\]]*\]\s*/);
         if (tsMatch) {
             return text.substring(tsMatch.index + tsMatch[0].length);
         }
-        // No timestamp found = this is ONLY recall text, no real user message
+        // No timestamp found = this is ONLY recall/contemplation text, no real user message
         return '';
     }
 
@@ -897,13 +899,16 @@ function _stripContextBlocks(text) {
         return text.substring(timestampMatch.index + timestampMatch[0].length);
     }
     // Fallback: strip known block prefixes line by line
-    if (text.startsWith('[CONTINUITY CONTEXT]') || text.startsWith('[STABILITY CONTEXT]')) {
+    if (text.startsWith('[CONTINUITY CONTEXT]') || 
+        text.startsWith('[STABILITY CONTEXT]') ||
+        text.startsWith('[CONTEMPLATION STATE]')) {
         // Find first line that doesn't look like injected context
         const lines = text.split('\n');
         const realStart = lines.findIndex(line =>
             line.length > 0 &&
             !line.startsWith('[CONTINUITY CONTEXT]') &&
             !line.startsWith('[STABILITY CONTEXT]') &&
+            !line.startsWith('[CONTEMPLATION STATE]') &&
             !line.startsWith('[TOPIC NOTE]') &&
             !line.startsWith('Session:') &&
             !line.startsWith('Topics:') &&
@@ -911,6 +916,8 @@ function _stripContextBlocks(text) {
             !line.startsWith('Entropy:') &&
             !line.startsWith('Principles:') &&
             !line.startsWith('Recent decisions:') &&
+            !line.startsWith('Active inquiries:') &&
+            !line.startsWith('- "what is unknown') &&
             !line.startsWith('You remember these') &&
             !line.startsWith('- They told you:') &&
             !line.startsWith('  You said:') &&
