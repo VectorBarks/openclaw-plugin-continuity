@@ -919,7 +919,6 @@ function _stripContextBlocks(text) {
             !line.startsWith('Speak from this memory') &&
             !line.startsWith('From your knowledge base:')
         );
-        );
         if (realStart >= 0) {
             return lines.slice(realStart).join('\n').trim();
         }
