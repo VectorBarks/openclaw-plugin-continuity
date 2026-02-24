@@ -150,6 +150,9 @@ module.exports = {
 
                 // Retrieval cache (per-agent, per-turn)
                 this.lastRetrievalCache = null;
+
+                // Cached user message from previous turn (agent_end → before_agent_start)
+                this.cachedUserMessage = null;
             }
 
             async ensureStorage() {
@@ -217,6 +220,13 @@ module.exports = {
                 lastUserText = typeof event.message === 'string'
                     ? event.message
                     : _extractText(event.message);
+            }
+
+            // Fallback: use cached message from previous agent_end
+            // (OpenClaw doesn't always populate event at before_agent_start)
+            if (!lastUserText && state.cachedUserMessage) {
+                lastUserText = state.cachedUserMessage;
+                state.cachedUserMessage = null; // Consume cache
             }
 
             // Build continuity context block
@@ -484,6 +494,11 @@ module.exports = {
 
             // Strip plugin-injected context blocks from user message before tracking
             const userMessage = _stripContextBlocks(rawUserMessage);
+
+            // Cache user message for next before_agent_start (OpenClaw doesn't populate event there)
+            if (userMessage && userMessage.trim().length > 0) {
+                state.cachedUserMessage = userMessage;
+            }
 
             // 1. Update topic tracker
             if (userMessage) state.topicTracker.track(userMessage);
