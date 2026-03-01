@@ -948,6 +948,23 @@ const CONTEXT_LINE_PREFIXES = [
     '  Insight: "',
 ];
 
+/**
+ * Prefixes injected by channels (Telegram, WhatsApp, etc.) and system events.
+ * These appear as untrusted metadata prepended to user messages
+ * via prependContext or similar channel-level injection.
+ */
+const CHANNEL_METADATA_PREFIXES = [
+    'Conversation info (untrusted',
+    'Replied message (untrusted',
+    'System:',
+    'Pre-compaction',
+    'Current time:',
+    '[media attached',
+    'To send an image',
+    '```json',
+    '```',
+];
+
 function _isContextLine(line) {
     if (line.length === 0) return true; // blank lines between blocks
     for (const header of CONTEXT_BLOCK_HEADERS) {
@@ -956,6 +973,12 @@ function _isContextLine(line) {
     for (const prefix of CONTEXT_LINE_PREFIXES) {
         if (line.startsWith(prefix)) return true;
     }
+    for (const prefix of CHANNEL_METADATA_PREFIXES) {
+        if (line.startsWith(prefix)) return true;
+    }
+    // Inline JSON fragments from channel metadata blocks
+    if (/^\s*[{}]/.test(line)) return true;         // lines starting with { or }
+    if (/^\s*"(message_id|sender|sender_id|chat_id|chat_title|reply_to)"/.test(line)) return true;
     // Lines that are clearly context metadata
     if (/^- [A-Z]+:/.test(line)) return false; // real content like "- NOTE: ..."
     if (line.startsWith('- "') || line.startsWith('  -')) return true; // nested recall items
@@ -965,10 +988,11 @@ function _isContextLine(line) {
 function _stripContextBlocks(text) {
     if (!text) return '';
 
-    // Fast path: no context blocks present
+    // Fast path: no context blocks or channel metadata present
     const hasBlock = CONTEXT_BLOCK_HEADERS.some(h => text.includes(h));
     const hasRecall = text.includes('You remember these') || text.includes('From your knowledge base:');
-    if (!hasBlock && !hasRecall) return text;
+    const hasChannelMeta = CHANNEL_METADATA_PREFIXES.some(p => text.includes(p));
+    if (!hasBlock && !hasRecall && !hasChannelMeta) return text;
 
     // Primary strategy: find the timestamp marker that signals real user text.
     // e.g. [Mon 2026-02-16 08:57 PST]
