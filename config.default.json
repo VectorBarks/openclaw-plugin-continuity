@@ -1,10 +1,10 @@
 {
   "contextBudget": {
-    "contextBudgetRatio": 0.65,
-    "recentTurnsAlwaysFull": 5,
-    "recentTurnCharLimit": 3000,
-    "midTurnCharLimit": 1500,
-    "olderTurnCharLimit": 500,
+    "contextBudgetRatio": 0.40,
+    "recentTurnsAlwaysFull": 3,
+    "recentTurnCharLimit": 2000,
+    "midTurnCharLimit": 1000,
+    "olderTurnCharLimit": 300,
     "poolRatios": {
       "essential": 0.30,
       "high": 0.25,
@@ -44,7 +44,7 @@
   },
 
   "compaction": {
-    "threshold": 0.80,
+    "threshold": 0.65,
     "fallbackMessages": 20,
     "taskAwareCompaction": true
   },
