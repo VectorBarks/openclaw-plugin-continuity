@@ -33,10 +33,10 @@ const fs = require('fs');
 // ---------------------------------------------------------------------------
 
 function loadConfig(userConfig = {}) {
-    const defaultConfig = JSON.parse(
-        fs.readFileSync(path.join(__dirname, 'config.default.json'), 'utf8')
-    );
-    return deepMerge(defaultConfig, userConfig);
+    const defaultConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.default.json'), 'utf8'));
+    let localConfig = {};
+    try { localConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json'), 'utf8')); } catch(e) {}
+    return deepMerge(deepMerge(defaultConfig, localConfig), userConfig);
 }
 
 function deepMerge(target, source) {
