@@ -534,6 +534,14 @@ module.exports = {
 
             if (!lastAssistant && !lastUser) return;
 
+            // Skip non-conversation sessions (crons, heartbeats, inter-session)
+            const sessionKey = ctx?.sessionKey || ctx?.agentId || '';
+            const isNonConversation =
+                sessionKey.includes(':cron:') ||
+                event?.metadata?.isHeartbeat === true ||
+                event?.metadata?.sourceSessionKey?.includes(':cron:');
+            if (isNonConversation) return;
+
             const rawUserMessage = _extractText(lastUser);
             const responseText = _extractText(lastAssistant);
 
@@ -789,6 +797,24 @@ module.exports = {
             }
             respond(true, agents);
         });
+
+        // Re-index every 2 hours (belt + suspenders alongside session_end indexing)
+        setInterval(async () => {
+            for (const [agentId, state] of agentStates) {
+                try {
+                    await state.ensureStorage();
+                    if (!state.indexer) continue;
+                    const today = new Date().toISOString().substring(0, 10);
+                    const conversation = state.archiver.getConversation(today);
+                    if (conversation && conversation.messages) {
+                        await state.indexer.indexDay(today, conversation.messages);
+                        api.logger.info(`[Continuity:${agentId}] Periodic re-index complete for ${today}`);
+                    }
+                } catch (err) {
+                    api.logger.warn(`[Continuity:${agentId}] Periodic re-index failed: ${err.message}`);
+                }
+            }
+        }, 2 * 60 * 60 * 1000); // every 2 hours
 
         api.logger.info('Continuity plugin registered (multi-agent) — per-agent context budgeting, topic tracking, archive + semantic search');
     }
