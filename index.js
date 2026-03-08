@@ -994,6 +994,10 @@ const CHANNEL_METADATA_PREFIXES = [
     'Current time:',
     '[media attached',
     'To send an image',
+    '[Audio]',
+    'User text:',
+    '[Replying to',
+    '[/Replying]',
     '```json',
     '```',
 ];
@@ -1026,6 +1030,14 @@ function _stripContextBlocks(text) {
     const hasRecall = text.includes('You remember these') || text.includes('From your knowledge base:');
     const hasChannelMeta = CHANNEL_METADATA_PREFIXES.some(p => text.includes(p));
     if (!hasBlock && !hasRecall && !hasChannelMeta) return text;
+
+    // Audio message strategy: extract text after last "Transcript:\n"
+    // Audio messages look like: [Audio]\nUser text:\n[Telegram ...]: <media:audio>\nTranscript:\n<real text>
+    const transcriptIdx = text.lastIndexOf('\nTranscript:\n');
+    if (transcriptIdx !== -1) {
+        const transcript = text.substring(transcriptIdx + '\nTranscript:\n'.length).trim();
+        if (transcript.length > 0) return transcript;
+    }
 
     // Primary strategy: find the timestamp marker that signals real user text.
     // e.g. [Mon 2026-02-16 08:57 PST]
