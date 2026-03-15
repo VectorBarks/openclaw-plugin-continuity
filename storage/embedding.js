@@ -50,7 +50,7 @@ class EmbeddingProvider {
         // pipeline() on every invocation (no caching, no tensor disposal).
         try {
             const { pipeline } = require('@huggingface/transformers');
-            this._pipeline = await pipeline('feature-extraction', this.model);
+            this._pipeline = await pipeline('feature-extraction', this.model, { dtype: 'fp32' });
 
             // Warm up + verify dimensions
             const test = await this._pipeline('test', { pooling: 'mean', normalize: true });
