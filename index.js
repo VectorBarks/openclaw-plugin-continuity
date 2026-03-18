@@ -212,6 +212,11 @@ module.exports = {
         /** @type {Map<string, AgentState>} */
         const agentStates = new Map();
 
+        // Survives state.close() + agentStates.delete() across session boundaries.
+        // Preserves cachedUserMessage so the next before_agent_start can use it.
+        /** @type {Map<string, string>} */
+        const cachedMessages = new Map();
+
         /**
          * Get or create per-agent state.
          * @param {string} [agentId] - Agent ID from hook context
@@ -220,7 +225,13 @@ module.exports = {
         function getAgentState(agentId) {
             const id = agentId || 'main';
             if (!agentStates.has(id)) {
-                agentStates.set(id, new AgentState(id));
+                const newState = new AgentState(id);
+                // Restore cachedUserMessage that survived previous state.close()
+                if (cachedMessages.has(id)) {
+                    newState.cachedUserMessage = cachedMessages.get(id);
+                    cachedMessages.delete(id);
+                }
+                agentStates.set(id, newState);
                 api.logger.info(`Initialized continuity state for agent "${id}"`);
             }
             return agentStates.get(id);
@@ -249,6 +260,11 @@ module.exports = {
                 lastUserText = typeof event.message === 'string'
                     ? event.message
                     : _extractText(event.message);
+            }
+
+            // Fallback: OpenClaw may pass user text as event.prompt (new hook architecture)
+            if (!lastUserText && event.prompt) {
+                lastUserText = typeof event.prompt === 'string' ? event.prompt : '';
             }
 
             // Fallback: use cached message from previous agent_end
@@ -685,6 +701,13 @@ module.exports = {
                 }
             } catch (err) {
                 api.logger.warn(`Session-end indexing failed for agent "${state.agentId}": ${err.message}`);
+            }
+
+            // Preserve cachedUserMessage before releasing state —
+            // it needs to survive across session boundaries so the next
+            // before_agent_start can use it as fallback for user text.
+            if (state.cachedUserMessage) {
+                cachedMessages.set(state.agentId, state.cachedUserMessage);
             }
 
             // Release resources: embedding pipeline, DB connections, caches.
