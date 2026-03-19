@@ -1,0 +1,9 @@
+{
+  "_comment": "Private overrides for continuity plugin. Copy to config.local.json and customize.",
+  "contextBudget": {
+    "maxTokens": 4000
+  },
+  "embedding": {
+    "model": "your-model-name"
+  }
+}
