@@ -213,6 +213,17 @@ The plugin does **not** write to MEMORY.md. That file is the agent's curated mem
 
 All configuration is optional. The plugin ships with sensible defaults in `config.default.json`.
 
+### Local Configuration Overrides
+
+For private or deployment-specific settings, create a `config.local.json` in the plugin directory. This file is git-ignored and overlays values from `config.default.json` without modifying tracked files.
+
+```bash
+cp config.local.example.json config.local.json
+# Edit config.local.json with your overrides
+```
+
+The merge order is: `config.default.json` → `config.local.json` → `openclaw.json` plugin config. Later sources override earlier ones.
+
 ```json
 {
   "contextBudget": {
